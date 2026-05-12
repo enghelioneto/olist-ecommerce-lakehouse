@@ -1,0 +1,1 @@
+-- Consultas analiticas do projeto.

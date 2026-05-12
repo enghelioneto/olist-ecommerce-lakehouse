@@ -1,0 +1,1 @@
+-- Consultas para dashboards e visualizacoes.

@@ -1,0 +1,1 @@
+-- Setup inicial de catalog, schema e volume para o projeto Olist.
