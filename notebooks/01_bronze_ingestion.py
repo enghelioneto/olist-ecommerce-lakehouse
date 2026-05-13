@@ -1,5 +1,4 @@
 # Databricks notebook source
-
 # dbutils.fs.ls("/Volumes/olist_lakehouse/raw/landing")
 
 from pyspark.sql import functions as F
@@ -23,7 +22,7 @@ files = {
     "product_category_translation": "product_category_name_translation.csv"
 }
 
-# COMMAND ---------
+# COMMAND ----------
 
 def read_csv_from_volume(file_name: str):
     """
@@ -47,4 +46,48 @@ def read_csv_from_volume(file_name: str):
 
     return df
 
-display(read_csv_from_volume("olist_customers_dataset.csv"))
+# display(read_csv_from_volume("olist_customers_dataset.csv"))
+
+# COMMAND ----------
+
+def add_bronze_metadata(df, file_name: str):
+    return (
+        df
+        .withColumn("_sorce_file", F.lit(file_name))
+        .withColumn("_source_system", F.lit("olist_kaggle"))
+        .withColumn("_ingested_at", F.current_timestamp())
+        .withColumn(
+            "_row_hash",    # nome da nova coluna hash
+            F.sha2(         # aplica hash SHA-2
+                F.concat_ws(
+                    "||",   # separador usado entre os valores das colunas
+                    *[      # percorre todas as colunas do DataFrame
+                            # pega a coluna, converte pra string e troca null por string vazia
+                        F.coalesce(F.col(c).cast("string"), F.lit(""))
+                        for c in df.columns
+                    ]
+                ),
+                256
+            )
+        )
+    )
+
+# COMMAND ----------
+
+for table_name, file_name in files.items():
+    full_table_name = f"{catalog}.{bronze_schema}.{table_name}"
+
+    print(f"Reading file: {file_name}")
+
+    df_raw = read_csv_from_volume(file_name)
+    df_bronze = add_bronze_metadata(df_raw, file_name)
+
+    (
+        df_bronze.write
+        .format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema", True)
+        .saveAsTable(full_table_name)
+    )
+
+    print(f"Created Bronze table: {full_table_name}")
