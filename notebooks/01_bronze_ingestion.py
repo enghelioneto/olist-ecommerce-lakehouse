@@ -53,9 +53,9 @@ def read_csv_from_volume(file_name: str):
 def add_bronze_metadata(df, file_name: str):
     return (
         df
-        .withColumn("_sorce_file", F.lit(file_name))
+        .withColumn("_source_file", F.lit(file_name))
         .withColumn("_source_system", F.lit("olist_kaggle"))
-        .withColumn("_ingested_at", F.current_timestamp())
+        .withColumn("_ingested_at_utc", F.current_timestamp())
         .withColumn(
             "_row_hash",    # nome da nova coluna hash
             F.sha2(         # aplica hash SHA-2
