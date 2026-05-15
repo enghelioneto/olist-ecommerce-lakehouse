@@ -32,7 +32,7 @@ silver_customers = (
     .select(
         F.col("customer_id"),
         F.col("customer_unique_id"),
-        F.col("customer_zip_code_prefix").cast("int").alias("customer_zip_code_prefix"),
+        F.col("customer_zip_code_prefix"),
         F.lower(F.trim(F.col("customer_city"))).alias("customer_city"),
         F.upper(F.trim(F.col("customer_state"))).alias("customer_state"),
         F.col("_source_file"),
@@ -83,8 +83,8 @@ silver_order_items = (
         F.col("product_id"),
         F.col("seller_id"),
         F.to_timestamp("shipping_limit_date").alias("shipping_limit_date"),
-        F.col("price").cast("double").alias("price"),
-        F.col("freight_value").cast("double").alias("freight_value"),
+        F.col("price").cast("decimal(12,2)").alias("price"),
+        F.col("freight_value").cast("decimal(12,2)").alias("freight_value"),
         F.col("_source_file"),
         F.col("_source_system"),
         F.col("_ingested_at_utc")
@@ -108,7 +108,7 @@ silver_order_payments = (
         F.col("payment_sequential").cast("int").alias("payment_sequential"),
         F.lower(F.trim(F.col("payment_type"))).alias("payment_type"),
         F.col("payment_installments").cast("int").alias("payment_installments"),
-        F.col("payment_value").cast("double").alias("payment_value"),
+        F.col("payment_value").cast("decimal(12,2)").alias("payment_value"),
         F.col("_source_file"),
         F.col("_source_system"),
         F.col("_ingested_at_utc")
@@ -152,7 +152,7 @@ df_geolocation = read_bronze("geolocation")
 silver_geolocation = (
     df_geolocation
     .select(
-        F.col("geolocation_zip_code_prefix").cast("int").alias("geolocation_zip_code_prefix"),
+        F.col("geolocation_zip_code_prefix"),
         F.col("geolocation_lat").cast("double").alias("geolocation_lat"),
         F.col("geolocation_lng").cast("double").alias("geolocation_lng"),
         F.lower(F.trim(F.col("geolocation_city"))).alias("geolocation_city"),
@@ -196,7 +196,7 @@ silver_products = (
         F.col("_ingested_at_utc")
     )
     .dropDuplicates(["product_id"])
-    .withColumn("_silver_processed_at", F.current_timestamp())
+    .withColumn("_silver_processed_at_utc", F.current_timestamp())
 )
 
 write_silver(silver_products, "products")
@@ -209,7 +209,7 @@ silver_sellers = (
     df_sellers
     .select(
         F.col("seller_id"),
-        F.col("seller_zip_code_prefix").cast("int").alias("seller_zip_code_prefix"),
+        F.col("seller_zip_code_prefix"),
         F.lower(F.trim(F.col("seller_city"))).alias("seller_city"),
         F.upper(F.trim(F.col("seller_state"))).alias("seller_state"),
         F.col("_source_file"),
@@ -217,7 +217,7 @@ silver_sellers = (
         F.col("_ingested_at_utc")
     )
     .dropDuplicates(["seller_id"])
-    .withColumn("_silver_processed_at", F.current_timestamp())
+    .withColumn("_silver_processed_at_utc", F.current_timestamp())
 )
 display(silver_sellers.limit(10))
 write_silver(silver_sellers, "sellers")
@@ -236,7 +236,7 @@ silver_translation = (
         F.col("_ingested_at_utc")
     )
     .dropDuplicates(["product_category_name"])
-    .withColumn("_silver_processed_at", F.current_timestamp())
+    .withColumn("_silver_processed_at_utc", F.current_timestamp())
 )
 # display(silver_translation.limit(10))
 write_silver(silver_translation, "product_category_translation")
