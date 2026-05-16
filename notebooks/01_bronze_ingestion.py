@@ -1,14 +1,17 @@
 # Databricks notebook source
 # dbutils.fs.ls("/Volumes/olist_lakehouse/raw/landing")
-
+from uuid import uuid4
 from pyspark.sql import functions as F
 
 # COMMAND ----------
 
 catalog = "olist_lakehouse"
+raw_schema = "raw"
 bronze_schema = "bronze"
 
 raw_path = "/Volumes/olist_lakehouse/raw/landing"
+ingestion_audit_table = f"{catalog}.{raw_schema}.ingestion_audit"
+current_batch_id = str(uuid4())
 
 files = {
     "customers": "olist_customers_dataset.csv",
@@ -50,11 +53,12 @@ def read_csv_from_volume(file_name: str):
 
 # COMMAND ----------
 
-def add_bronze_metadata(df, file_name: str):
+def add_bronze_metadata(df, file_name: str, batch_id: str):
     return (
         df
         .withColumn("_source_file", F.lit(file_name))
         .withColumn("_source_system", F.lit("olist_kaggle"))
+        .withColumn("_batch_id", F.lit(batch_id))
         .withColumn("_ingested_at_utc", F.current_timestamp())
         .withColumn(
             "_row_hash",    # nome da nova coluna hash
@@ -64,7 +68,7 @@ def add_bronze_metadata(df, file_name: str):
                     *[      # percorre todas as colunas do DataFrame
                             # pega a coluna, converte pra string e troca null por string vazia
                         F.coalesce(F.col(c).cast("string"), F.lit(""))
-                        for c in df.columns
+                        for c in df.columns if not c.startswith("_")
                     ]
                 ),
                 256
@@ -74,20 +78,70 @@ def add_bronze_metadata(df, file_name: str):
 
 # COMMAND ----------
 
-for table_name, file_name in files.items():
+def write_bronze(df, table_name: str):
     full_table_name = f"{catalog}.{bronze_schema}.{table_name}"
 
-    print(f"Reading file: {file_name}")
-
-    df_raw = read_csv_from_volume(file_name)
-    df_bronze = add_bronze_metadata(df_raw, file_name)
-
     (
-        df_bronze.write
+        df.write
         .format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", True)
+        .mode("append")
+        .option("mergeSchema", True)
         .saveAsTable(full_table_name)
     )
 
-    print(f"Created Bronze table: {full_table_name}")
+    return full_table_name
+
+# COMMAND ----------
+
+def build_ingestion_audit(table_name: str, file_name: str, row_count: int, batch_id: str):
+    source_path = f"{raw_path}/{file_name}"
+
+    return (
+        spark.range(1)
+        .select(
+            F.lit(catalog).alias("catalog_name"),
+            F.lit(bronze_schema).alias("schema_name"),
+            F.lit(table_name).alias("table_name"),
+            F.lit(file_name).alias("_source_file"),
+            F.lit(source_path).alias("_source_path"),
+            F.lit("olist_kaggle").alias("_source_system"),
+            F.lit(batch_id).alias("_batch_id"),
+            F.current_date().alias("_ingestion_date_utc"),
+            F.current_timestamp().alias("_logged_at_utc"),
+            F.lit(row_count).alias("row_count")
+        )
+    )
+
+# COMMAND ----------
+
+def write_ingestion_audit(df):
+    (
+        df.write
+        .format("delta")
+        .mode("append")
+        .option("mergeSchema", True)
+        .saveAsTable(ingestion_audit_table)
+    )
+
+# COMMAND ----------
+
+print(f"Starting Bronze ingestion batch: {current_batch_id}")
+
+for table_name, file_name in files.items():
+    # full_table_name = f"{catalog}.{bronze_schema}.{table_name}"
+
+    print(f"Reading file: {file_name} | batch_id={current_batch_id}")
+
+    df_raw = read_csv_from_volume(file_name)
+    df_bronze = add_bronze_metadata(df_raw, file_name, current_batch_id)
+    row_count = df_bronze.count()
+
+    full_table_name = write_bronze(df_bronze, table_name)
+    audit_df = build_ingestion_audit(table_name, file_name, row_count, current_batch_id)
+    write_ingestion_audit(audit_df)
+
+    print(f"Appended {row_count} rows into Bronze table: {full_table_name}")
+
+# COMMAND ----------
+
+
