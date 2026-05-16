@@ -1,17 +1,11 @@
 # Databricks notebook source
-from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 # COMMAND ----------
 
-spark.conf.set("spark.sql.session.timeZone", "UTC")
-
 catalog = "olist_lakehouse"
 bronze_schema = "bronze"
 silver_schema = "silver"
-quarantine_schema = "quarantine"
-
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{quarantine_schema}")
 
 def read_bronze(table_name: str):
     return spark.table(f"{catalog}.{bronze_schema}.{table_name}")
@@ -31,107 +25,26 @@ def write_silver(df, table_name: str):
 
 # COMMAND ----------
 
-def write_quarantine(df, table_name: str):
-    full_table_name = f"{catalog}.{quarantine_schema}.{table_name}"
-
-    (
-        df.write
-        .format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", True)
-        .saveAsTable(full_table_name)
-    )
-
-    print(f"Created quarantine table: {full_table_name}")
-
-# COMMAND ----------
-
-def blank_string_as_null(column_name: str):
-    trimmed_column = F.trim(F.col(column_name))
-    return F.when(trimmed_column == "", F.lit(None)).otherwise(trimmed_column)
-
-# COMMAND ----------
-
-def normalized_string(column_name: str, alias: str = None, case: str = None):
-    normalized_column = blank_string_as_null(column_name)
-
-    if case == "lower":
-        normalized_column = F.lower(normalized_column)
-    elif case == "upper":
-        normalized_column = F.upper(normalized_column)
-
-    return normalized_column.alias(alias or column_name)
-
-# COMMAND ----------
-
-def cast_from_raw(column_name: str, target_type: str, alias: str = None):
-    return blank_string_as_null(column_name).cast(target_type).alias(alias or column_name)
-
-# COMMAND ----------
-
-def timestamp_from_raw(column_name: str, alias: str = None):
-    return F.to_timestamp(blank_string_as_null(column_name)).alias(alias or column_name)
-
-# COMMAND ----------
-
-def zip_prefix_from_raw(column_name: str, alias: str = None):
-    return F.lpad(blank_string_as_null(column_name), 5, "0").alias(alias or column_name)
-
-# COMMAND ----------
-
-def lineage_columns():
-    return [
-        F.col("_source_file"),
-        F.col("_source_path"),
-        F.col("_source_system"),
-        F.col("_batch_id"),
-        F.col("_ingestion_date_utc"),
-        F.col("_ingested_at_utc"),
-        F.col("_row_hash")
-    ]
-
-# COMMAND ----------
-
-def deduplicate_with_quarantine(df, business_key_columns, quarantine_table_name: str):
-    window_spec = Window.partitionBy(*business_key_columns).orderBy(
-        F.col("_ingested_at_utc").desc(),
-        F.col("_batch_id").desc(),
-        F.col("_row_hash").desc()
-    )
-
-    ranked_df = df.withColumn("_dedupe_rank", F.row_number().over(window_spec))
-
-    clean_df = ranked_df.filter(F.col("_dedupe_rank") == 1).drop("_dedupe_rank")
-    quarantined_df = (
-        ranked_df
-        .filter(F.col("_dedupe_rank") > 1)
-        .withColumn("_quarantine_reason", F.lit("duplicate_business_key_kept_latest_ingestion"))
-        .withColumn("_quarantined_at_utc", F.current_timestamp())
-    )
-
-    write_quarantine(quarantined_df, quarantine_table_name)
-
-    return clean_df
-
-# COMMAND ----------
-
 df_customers = read_bronze("customers")
 
 silver_customers = (
     df_customers
     .select(
-        normalized_string("customer_id"),
-        normalized_string("customer_unique_id"),
-        zip_prefix_from_raw("customer_zip_code_prefix"),
-        normalized_string("customer_city", case="lower"),
-        normalized_string("customer_state", case="upper"),
-        *lineage_columns()
+        F.col("customer_id"),
+        F.col("customer_unique_id"),
+        F.col("customer_zip_code_prefix"),
+        F.lower(F.trim(F.col("customer_city"))).alias("customer_city"),
+        F.upper(F.trim(F.col("customer_state"))).alias("customer_state"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
     .dropDuplicates(["customer_id"])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
 )
 
 write_silver(silver_customers, "customers")
+# display(silver_customers.limit(10))
 
 # COMMAND ----------
 
@@ -140,15 +53,17 @@ df_orders = read_bronze("orders")
 silver_orders = (
     df_orders
     .select(
-        normalized_string("order_id"),
-        normalized_string("customer_id"),
-        normalized_string("order_status", case="lower"),
-        timestamp_from_raw("order_purchase_timestamp"),
-        timestamp_from_raw("order_approved_at"),
-        timestamp_from_raw("order_delivered_carrier_date"),
-        timestamp_from_raw("order_delivered_customer_date"),
-        timestamp_from_raw("order_estimated_delivery_date"),
-        *lineage_columns()
+        F.col("order_id"),
+        F.col("customer_id"),
+        F.lower(F.trim(F.col("order_status"))).alias("order_status"),
+        F.to_timestamp("order_purchase_timestamp").alias("order_purchase_timestamp"),
+        F.to_timestamp("order_approved_at").alias("order_approved_at"),
+        F.to_timestamp("order_delivered_carrier_date").alias("order_delivered_carrier_date"),
+        F.to_timestamp("order_delivered_customer_date").alias("order_delivered_customer_date"),
+        F.to_timestamp("order_estimated_delivery_date").alias("order_estimated_delivery_date"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
     .dropDuplicates(["order_id"])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
@@ -159,45 +74,44 @@ write_silver(silver_orders, "orders")
 # COMMAND ----------
 
 df_order_items = read_bronze("order_items")
-
-silver_order_items_typed = (
+# display(df_order_items.limit(1))
+silver_order_items = (
     df_order_items
     .select(
-        normalized_string("order_id"),
-        cast_from_raw("order_item_id", "int"),
-        normalized_string("product_id"),
-        normalized_string("seller_id"),
-        timestamp_from_raw("shipping_limit_date"),
-        cast_from_raw("price", "decimal(10,2)"),
-        cast_from_raw("freight_value", "decimal(10,2)"),
-        *lineage_columns()
+        F.col("order_id"),
+        F.col("order_item_id").cast("int").alias("order_item_id"),
+        F.col("product_id"),
+        F.col("seller_id"),
+        F.to_timestamp("shipping_limit_date").alias("shipping_limit_date"),
+        F.col("price").cast("decimal(12,2)").alias("price"),
+        F.col("freight_value").cast("decimal(12,2)").alias("freight_value"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
-)
-
-silver_order_items = (
-    deduplicate_with_quarantine(
-        silver_order_items_typed,
-        ["order_id", "order_item_id"],
-        "order_items"
-    )
+    .dropDuplicates(["order_id", "order_item_id"])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
 )
 
+# display(silver_order_items.limit(1))
 write_silver(silver_order_items, "order_items")
 
 # COMMAND ----------
 
 df_order_payments = read_bronze("order_payments")
+# display(df_order_payments.limit(100))
 
 silver_order_payments = (
     df_order_payments
     .select(
-        normalized_string("order_id"),
-        cast_from_raw("payment_sequential", "int"),
-        normalized_string("payment_type", case="lower"),
-        cast_from_raw("payment_installments", "int"),
-        cast_from_raw("payment_value", "decimal(10,2)"),
-        *lineage_columns()
+        F.col("order_id"),
+        F.col("payment_sequential").cast("int").alias("payment_sequential"),
+        F.lower(F.trim(F.col("payment_type"))).alias("payment_type"),
+        F.col("payment_installments").cast("int").alias("payment_installments"),
+        F.col("payment_value").cast("decimal(12,2)").alias("payment_value"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
     .dropDuplicates(["order_id", "payment_sequential"])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
@@ -208,18 +122,21 @@ write_silver(silver_order_payments, "order_payments")
 # COMMAND ----------
 
 df_order_reviews = read_bronze("order_reviews")
+# display(df_order_reviews.limit(100))
 
 silver_order_reviews = (
     df_order_reviews
     .select(
-        normalized_string("review_id"),
-        normalized_string("order_id"),
-        cast_from_raw("review_score", "int"),
-        normalized_string("review_comment_title"),
-        normalized_string("review_comment_message"),
-        timestamp_from_raw("review_creation_date"),
-        timestamp_from_raw("review_answer_timestamp"),
-        *lineage_columns()
+        F.col("review_id"),
+        F.col("order_id"),
+        F.col("review_score").cast("int").alias("review_score"),
+        F.trim(F.col("review_comment_title")).alias("review_comment_title"),
+        F.trim(F.col("review_comment_message")).alias("review_comment_message"),
+        F.to_timestamp("review_creation_date").alias("review_creation_date"),
+        F.to_timestamp("review_answer_timestamp").alias("review_answer_timestamp"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
     .dropDuplicates(["review_id", "order_id"])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
@@ -230,46 +147,53 @@ write_silver(silver_order_reviews, "order_reviews")
 # COMMAND ----------
 
 df_geolocation = read_bronze("geolocation")
+# display(df_geolocation.limit(10))
 
 silver_geolocation = (
     df_geolocation
     .select(
-        zip_prefix_from_raw("geolocation_zip_code_prefix"),
-        cast_from_raw("geolocation_lat", "double"),
-        cast_from_raw("geolocation_lng", "double"),
-        normalized_string("geolocation_city", case="lower"),
-        normalized_string("geolocation_state", case="upper"),
-        *lineage_columns()
+        F.col("geolocation_zip_code_prefix"),
+        F.col("geolocation_lat").cast("double").alias("geolocation_lat"),
+        F.col("geolocation_lng").cast("double").alias("geolocation_lng"),
+        F.lower(F.trim(F.col("geolocation_city"))).alias("geolocation_city"),
+        F.upper(F.trim(F.col("geolocation_state"))).alias("geolocation_state"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
     .dropDuplicates([
-        "geolocation_zip_code_prefix",
-        "geolocation_lat",
-        "geolocation_lng",
-        "geolocation_city",
+        "geolocation_zip_code_prefix", 
+        "geolocation_lat", 
+        "geolocation_lng", 
+        "geolocation_city", 
         "geolocation_state"
     ])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
 )
 
+# display(silver_geolocation.limit(100))
 write_silver(silver_geolocation, "geolocation")
 
 # COMMAND ----------
 
 df_products = read_bronze("products")
+# display(df_products.limit(100))
 
 silver_products = (
     df_products
     .select(
-        normalized_string("product_id"),
-        normalized_string("product_category_name", case="lower"),
-        cast_from_raw("product_name_lenght", "int", "product_name_length"),
-        cast_from_raw("product_description_lenght", "int", "product_description_length"),
-        cast_from_raw("product_photos_qty", "int"),
-        cast_from_raw("product_weight_g", "double"),
-        cast_from_raw("product_length_cm", "double"),
-        cast_from_raw("product_height_cm", "double"),
-        cast_from_raw("product_width_cm", "double"),
-        *lineage_columns()
+        F.col("product_id"),
+        F.lower(F.trim(F.col("product_category_name"))).alias("product_category_name"),
+        F.col("product_name_lenght").cast("int").alias("product_name_length"),
+        F.col("product_description_lenght").cast("int").alias("product_description_length"),
+        F.col("product_photos_qty").cast("int").alias("product_photos_qty"),
+        F.col("product_weight_g").cast("double").alias("product_weight_g"),
+        F.col("product_length_cm").cast("double").alias("product_length_cm"),
+        F.col("product_height_cm").cast("double").alias("product_height_cm"),
+        F.col("product_width_cm").cast("double").alias("product_width_cm"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
     .dropDuplicates(["product_id"])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
@@ -284,16 +208,18 @@ df_sellers = read_bronze("sellers")
 silver_sellers = (
     df_sellers
     .select(
-        normalized_string("seller_id"),
-        zip_prefix_from_raw("seller_zip_code_prefix"),
-        normalized_string("seller_city", case="lower"),
-        normalized_string("seller_state", case="upper"),
-        *lineage_columns()
+        F.col("seller_id"),
+        F.col("seller_zip_code_prefix"),
+        F.lower(F.trim(F.col("seller_city"))).alias("seller_city"),
+        F.upper(F.trim(F.col("seller_state"))).alias("seller_state"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
     .dropDuplicates(["seller_id"])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
 )
-
+display(silver_sellers.limit(10))
 write_silver(silver_sellers, "sellers")
 
 # COMMAND ----------
@@ -303,14 +229,16 @@ df_translation = read_bronze("product_category_translation")
 silver_translation = (
     df_translation
     .select(
-        normalized_string("product_category_name", case="lower"),
-        normalized_string("product_category_name_english", case="lower"),
-        *lineage_columns()
+        F.lower(F.trim(F.col("product_category_name"))).alias("product_category_name"),
+        F.lower(F.trim(F.col("product_category_name_english"))).alias("product_category_name_english"),
+        F.col("_source_file"),
+        F.col("_source_system"),
+        F.col("_ingested_at_utc")
     )
     .dropDuplicates(["product_category_name"])
     .withColumn("_silver_processed_at_utc", F.current_timestamp())
 )
-
+# display(silver_translation.limit(10))
 write_silver(silver_translation, "product_category_translation")
 
 # COMMAND ----------
