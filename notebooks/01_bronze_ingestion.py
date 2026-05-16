@@ -59,7 +59,7 @@ def add_bronze_metadata(df, file_name: str, batch_id: str):
         .withColumn("_source_file", F.lit(file_name))
         .withColumn("_source_system", F.lit("olist_kaggle"))
         .withColumn("_batch_id", F.lit(batch_id))
-        .withColumn("_ingested_at_utc", F.current_timestamp())
+        .withColumn("_ingested_at", F.current_timestamp())
         .withColumn(
             "_row_hash",    # nome da nova coluna hash
             F.sha2(         # aplica hash SHA-2
@@ -106,8 +106,8 @@ def build_ingestion_audit(table_name: str, file_name: str, row_count: int, batch
             F.lit(source_path).alias("_source_path"),
             F.lit("olist_kaggle").alias("_source_system"),
             F.lit(batch_id).alias("_batch_id"),
-            F.current_date().alias("_ingestion_date_utc"),
-            F.current_timestamp().alias("_logged_at_utc"),
+            F.current_date().alias("_ingestion_date"),
+            F.current_timestamp().alias("_logged_at"),
             F.lit(row_count).alias("row_count")
         )
     )
