@@ -37,10 +37,10 @@ files = {
 
 def read_csv_from_volume(file_name: str):
     """
-    Reads a CSV file from the Databricks volume using all columns as string.
+    Le um CSV do volume raw mantendo todas as colunas como string.
 
-    In the Bronze layer, we avoid strong transformations.
-    Type casting and business rules will be applied in the Silver layer.
+    Na Bronze, evitamos conversoes fortes. Tipagem, limpeza e regras
+    de negocio ficam para a camada Silver.
     """
     file_path = f"{raw_path}/{file_name}"
 
@@ -62,6 +62,13 @@ def read_csv_from_volume(file_name: str):
 # COMMAND ----------
 
 def add_bronze_metadata(df, file_name: str, batch_id: str):
+    """
+    Adiciona metadados tecnicos da ingestao e calcula o hash da linha.
+
+    O _row_hash usa apenas as colunas originais do CSV. Colunas tecnicas
+    iniciadas com "_" ficam fora do hash para nao alterar a identidade
+    da linha quando mudar batch, arquivo ou horario de ingestao.
+    """
     raw_columns = [column_name for column_name in df.columns if not column_name.startswith("_")]
 
     return (
@@ -88,6 +95,12 @@ def add_bronze_metadata(df, file_name: str, batch_id: str):
 # COMMAND ----------
 
 def write_bronze(df, table_name: str):
+    """
+    Grava o DataFrame na tabela Delta da camada Bronze em modo append.
+
+    O append simula ingestao incremental. A deduplicacao por _row_hash
+    acontece antes da chamada desta funcao, dentro do loop principal.
+    """
     full_table_name = f"{catalog}.{bronze_schema}.{table_name}"
 
     (
@@ -109,6 +122,12 @@ def build_ingestion_audit(
     appended_row_count: int,
     batch_id: str
 ):
+    """
+    Monta uma linha de auditoria para registrar o resultado da carga.
+
+    A tabela de auditoria guarda quantas linhas vieram da origem, quantas
+    foram inseridas na Bronze e quantas foram ignoradas por ja existirem.
+    """
     source_path = f"{raw_path}/{file_name}"
     skipped_row_count = source_row_count - appended_row_count
 
@@ -122,6 +141,8 @@ def build_ingestion_audit(
         status = "APPENDED"
 
     return (
+        # spark.range(1) cria uma unica linha para preencher com F.lit(...)
+        # e gravar como registro de log da ingestao.
         spark.range(1)
         .select(
             F.lit(catalog).alias("catalog_name"),
@@ -144,6 +165,12 @@ def build_ingestion_audit(
 # COMMAND ----------
 
 def write_ingestion_audit(df):
+    """
+    Grava o registro de auditoria em uma tabela Delta de metadados.
+
+    Essa tabela nao faz parte dos dados de negocio; ela serve para
+    acompanhar execucoes, duplicidades puladas e volume carregado.
+    """
     (
         df.write
         .format("delta")
@@ -201,4 +228,3 @@ for table_name, file_name in files.items():
     )
 
 # COMMAND ----------
-
