@@ -61,31 +61,8 @@ def read_csv_from_volume(file_name: str):
 
 # COMMAND ----------
 
-def get_raw_columns(df):
-    return [column_name for column_name in df.columns if not column_name.startswith("_")]
-
-
-def build_row_hash_expr(column_names, available_columns=None):
-    available_columns = set(available_columns) if available_columns is not None else None
-
-    return F.sha2(
-        F.concat_ws(
-            "||",
-            *[
-                (
-                    F.coalesce(F.col(column_name).cast("string"), F.lit(""))
-                    if available_columns is None or column_name in available_columns
-                    else F.lit("")
-                )
-                for column_name in column_names
-            ]
-        ),
-        256
-    )
-
-
 def add_bronze_metadata(df, file_name: str, batch_id: str):
-    raw_columns = get_raw_columns(df)
+    raw_columns = [column_name for column_name in df.columns if not column_name.startswith("_")]
 
     return (
         df
@@ -93,49 +70,25 @@ def add_bronze_metadata(df, file_name: str, batch_id: str):
         .withColumn("_source_system", F.lit("olist_kaggle"))
         .withColumn("_batch_id", F.lit(batch_id))
         .withColumn("_ingested_at", F.to_timestamp(F.lit(batch_started_at_value)))
-        .withColumn("_row_hash", build_row_hash_expr(raw_columns))
+        .withColumn(
+            "_row_hash",
+            F.sha2(
+                F.concat_ws(
+                    "||",
+                    *[
+                        F.coalesce(F.col(column_name).cast("string"), F.lit(""))
+                        for column_name in raw_columns
+                    ]
+                ),
+                256
+            )
+        )
     )
 
 # COMMAND ----------
 
-def full_bronze_table_name(table_name: str):
-    return f"{catalog}.{bronze_schema}.{table_name}"
-
-
-def table_exists(full_table_name: str):
-    return spark.catalog.tableExists(full_table_name)
-
-
-def get_existing_row_hashes(full_table_name: str, raw_columns):
-    existing_df = spark.table(full_table_name)
-    computed_hashes = existing_df.select(
-        build_row_hash_expr(raw_columns, existing_df.columns).alias("_row_hash")
-    )
-
-    if "_row_hash" in existing_df.columns:
-        stored_hashes = existing_df.select(F.col("_row_hash"))
-        return (
-            stored_hashes
-            .unionByName(computed_hashes)
-            .where(F.col("_row_hash").isNotNull())
-            .distinct()
-        )
-
-    return computed_hashes.where(F.col("_row_hash").isNotNull()).distinct()
-
-
-def keep_new_rows_only(df, table_name: str, raw_columns):
-    full_table_name = full_bronze_table_name(table_name)
-
-    if not table_exists(full_table_name):
-        return df
-
-    existing_hashes = get_existing_row_hashes(full_table_name, raw_columns)
-    return df.join(existing_hashes, on="_row_hash", how="left_anti")
-
-
 def write_bronze(df, table_name: str):
-    full_table_name = full_bronze_table_name(table_name)
+    full_table_name = f"{catalog}.{bronze_schema}.{table_name}"
 
     (
         df.write
@@ -149,25 +102,6 @@ def write_bronze(df, table_name: str):
 
 # COMMAND ----------
 
-def get_ingestion_status(source_row_count: int, appended_row_count: int):
-    if source_row_count == 0:
-        return "EMPTY_SOURCE"
-    if appended_row_count == 0:
-        return "SKIPPED_DUPLICATE"
-    if appended_row_count < source_row_count:
-        return "PARTIALLY_APPENDED"
-    return "APPENDED"
-
-
-def count_batch_rows(full_table_name: str, batch_id: str):
-    table_df = spark.table(full_table_name)
-
-    if "_batch_id" not in table_df.columns:
-        return 0
-
-    return table_df.where(F.col("_batch_id") == batch_id).count()
-
-
 def build_ingestion_audit(
     table_name: str,
     file_name: str,
@@ -177,7 +111,15 @@ def build_ingestion_audit(
 ):
     source_path = f"{raw_path}/{file_name}"
     skipped_row_count = source_row_count - appended_row_count
-    status = get_ingestion_status(source_row_count, appended_row_count)
+
+    if source_row_count == 0:
+        status = "EMPTY_SOURCE"
+    elif appended_row_count == 0:
+        status = "SKIPPED_DUPLICATE"
+    elif appended_row_count < source_row_count:
+        status = "PARTIALLY_APPENDED"
+    else:
+        status = "APPENDED"
 
     return (
         spark.range(1)
@@ -219,13 +161,29 @@ for table_name, file_name in files.items():
     print(f"Reading file: {file_name} | batch_id={current_batch_id}")
 
     df_raw = read_csv_from_volume(file_name)
-    raw_columns = get_raw_columns(df_raw)
     df_bronze = add_bronze_metadata(df_raw, file_name, current_batch_id)
-    df_to_append = keep_new_rows_only(df_bronze, table_name, raw_columns)
+    full_table_name = f"{catalog}.{bronze_schema}.{table_name}"
 
     source_row_count = df_raw.count()
+
+    if spark.catalog.tableExists(full_table_name):
+        existing_hashes = (
+            spark.table(full_table_name)
+            .select("_row_hash")
+            .where(F.col("_row_hash").isNotNull())
+            .distinct()
+        )
+
+        df_to_append = df_bronze.join(existing_hashes, on="_row_hash", how="left_anti")
+    else:
+        df_to_append = df_bronze
+
     full_table_name = write_bronze(df_to_append, table_name)
-    appended_row_count = count_batch_rows(full_table_name, current_batch_id)
+    appended_row_count = (
+        spark.table(full_table_name)
+        .where(F.col("_batch_id") == current_batch_id)
+        .count()
+    )
 
     audit_df = build_ingestion_audit(
         table_name,
@@ -243,5 +201,4 @@ for table_name, file_name in files.items():
     )
 
 # COMMAND ----------
-
 
