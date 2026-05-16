@@ -11,6 +11,9 @@ COMMENT 'Raw layer and landing area for source files';
 CREATE SCHEMA IF NOT EXISTS olist_lakehouse.bronze
 COMMENT 'Bronze layer: raw Delta tables ingested from CSV files';
 
+CREATE SCHEMA IF NOT EXISTS olist_lakehouse.metadata
+COMMENT 'Operational metadata, ingestion logs and pipeline audit tables';
+
 CREATE SCHEMA IF NOT EXISTS olist_lakehouse.silver
 COMMENT 'Silver layer: cleaned, typed and standardized Olist entities';
 
