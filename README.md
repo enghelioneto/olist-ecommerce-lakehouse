@@ -6,9 +6,13 @@ End-to-end data project built with Databricks Free Edition, PySpark, SQL, Delta 
 
 Build a lakehouse pipeline using the Olist Brazilian E-commerce dataset, transforming raw CSV files into analytical gold tables and dashboards.
 
+## Project Plan
+
+The step-by-step learning and implementation roadmap is documented in [docs/project_plan.md](docs/project_plan.md).
+
 ## Architecture
 
-CSV → Volume → Bronze → Silver → Gold → SQL Analytics → Dashboard
+CSV -> Volume -> Bronze -> Silver -> Gold -> SQL Analytics -> Dashboard
 
 ## Tech Stack
 
